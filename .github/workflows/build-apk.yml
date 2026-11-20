@@ -1,0 +1,142 @@
+name: Build Android APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Fahfile APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Node Dependencies
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build Web Bundle
+        env:
+          VITE_API_BASE_URL: ${{ vars.API_BASE_URL }}
+        run: npm run build
+
+      - name: Sync Capacitor Android Project
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Android SDK Environment & Licenses
+        run: |
+          echo "Menyiapkan environment Android SDK..."
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+          mkdir -p "$ANDROID_HOME/licenses"
+
+          if [ -f "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "platform-tools" || true
+          else
+            echo "::warning::sdkmanager tidak ditemukan di $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager; Gradle akan mengunduh komponen SDK otomatis."
+          fi
+
+      - name: Make Gradlew Executable
+        run: |
+          if [ -f "android/gradlew" ]; then
+            chmod +x android/gradlew
+            echo "Izin eksekusi diberikan pada android/gradlew"
+          else
+            echo "::error::File android/gradlew tidak ditemukan."
+            exit 1
+          fi
+
+      - name: Build Debug APK with Gradle
+        working-directory: android
+        run: |
+          echo "Memulai proses kompilasi APK dengan Gradle Wrapper..."
+          ./gradlew :app:assembleDebug \
+            --no-daemon \
+            --no-configuration-cache \
+            --stacktrace \
+            -Pandroid.builder.sdkDownload=true
+
+      - name: Collect APK Files
+        run: |
+          echo "Mengumpulkan file APK hasil build..."
+          mkdir -p build-apks
+
+          while IFS= read -r -d '' apk_file; do
+            rel_name=$(echo "$apk_file" | sed 's|^android/app/build/outputs/apk/||; s|/|_|g')
+            cp -v "$apk_file" "build-apks/${rel_name}"
+          done < <(find android/app/build/outputs/apk -name "*.apk" -type f -print0)
+
+          APK_COUNT=$(find build-apks -maxdepth 1 -type f -name "*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "::error::Tidak ada file APK yang ditemukan setelah :app:assembleDebug!"
+            exit 1
+          fi
+
+          echo "Ditemukan $APK_COUNT file APK:"
+          ls -lh build-apks/
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fahfile-debug-apk
+          path: build-apks/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Print Build Diagnostics on Failure
+        if: failure()
+        run: |
+          echo "=============================================="
+          echo "BUILD GAGAL - DETAIL DIAGNOSTIK"
+          echo "=============================================="
+          echo "Versi Node & npm:"
+          node -v || true
+          npm -v || true
+          echo "----------------------------------------------"
+          echo "Versi Java:"
+          java -version || true
+          echo "----------------------------------------------"
+          echo "Versi Gradle:"
+          if [ -f "android/gradlew" ]; then
+            (cd android && ./gradlew --version) || true
+          fi
+          echo "----------------------------------------------"
+          echo "Daftar File Root:"
+          ls -la
+          echo "----------------------------------------------"
+          echo "Daftar File android/:"
+          ls -la android/ || true
+          echo "----------------------------------------------"
+          echo "Daftar File android/app/:"
+          ls -la android/app/ || true
+          echo "=============================================="
